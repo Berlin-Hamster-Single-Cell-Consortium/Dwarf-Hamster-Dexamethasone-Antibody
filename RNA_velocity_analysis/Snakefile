@@ -1,0 +1,201 @@
+import scanpy as sc
+import pandas as pd
+import numpy as np
+import os
+import matplotlib.pyplot as pl
+import scvelo as scv
+import sys
+import seaborn as sns
+from util_fcts import *
+
+# NOTE DEAR USER: YOU WILL NEED TO CHANGE THESE DIRECTORIES!
+WDIR = "/fast/work/users/peidlis_c/data/Cov19Hamster/PhoRob_DexAb/"  # place to store medium sized data objects
+LOOM_FILE = WDIR + 'DexAb_combined_loomed.h5'  # NOTE please place the loom file from GEO supplement here :)
+
+
+rule all:
+    input:
+        WDIR + 'DexAb_combined_integrated_loomed_preprocessed_Neutrophils_Neutrophils.h5'
+
+rule preprocess:
+    input:
+        adata=WDIR + 'DexAb_combined_integrated_loomed.h5'
+    output:
+        WDIR + 'DexAb_combined_integrated_loomed_preprocessed.h5',
+        WDIR + 'DexAb_combined_integrated_loomed_preprocessed_Neutrophils.h5'
+    run:
+        adata = sc.read(input['adata'])
+        # apply filtering from Emanuel
+        adata = adata[~pd.isna(adata.obs['nCount_RNA'])].copy()
+        # gene sanity filtering
+        sc.pp.filter_genes(adata, min_cells=1)
+        # calc qc
+        adata = calc_qc(adata)
+        # pp
+        adata.layers['X_raw'] = adata.X
+        sc.pp.normalize_total(adata)
+        sc.pp.log1p(adata)
+        # scores
+        get_genefamily_percentage(adata, key=['Rpl', 'Rps'], start=True, name='ribo')
+        get_genefamily_percentage(adata, key=['Hba', 'Hbb'], start=True, name='hemo')
+        score_tumor_immune_cells(adata, species='mouse', signatures_path='metadata/')
+        score_smillie_str_epi_imm(adata, species='mouse', signatures_path='metadata/')
+        # write
+        adata.write(output[0])
+        adata[np.isin(adata.obs.celltype, ['Neutrophils'])].copy().write(output[2])
+
+rule integrate_seurat:
+    input:
+        pca='metadata/seurat_pca.csv',
+        umap='metadata/seurat_umap.csv',
+        metadata='metadata/seurat_metadata.csv',
+        adata=LOOM_FILE
+    output:
+        WDIR + 'DexAb_combined_integrated_loomed.h5'
+    run:
+        # from seurat
+        adata = sc.read(input['adata'])
+        pca = pd.read_csv(input['pca'], index_col=0)
+        umap = pd.read_csv(input['umap'], index_col=0)
+        metadata = pd.read_csv(input['metadata'], index_col=0)
+        translation = {
+            'U' : 'Untr',
+            'D' : 'dex',
+            'AB' : 'ab',
+            'ABD' : 'dexab'
+        }
+
+        info = np.array([cell.split('_') for cell in adata.obs.origin])
+        adata.obs['sample_id'] =[x[-1] for x in info[:,1]]
+        adata.obs['condition_id'] =[x[-1] for x in info[:,2]]
+        adata.obs['condition'] =[translation[x[:-1]] for x in info[:,2]]
+        adata.obs['dex'] = ['dex' in c for c in adata.obs.condition]
+        adata.obs['ab'] = ['ab' in c for c in adata.obs.condition]
+
+        adata.obs_names = [condition+'_'+condition_id+'_'+sample_id+'_'+index.split('-DexAb_')[0] for index, condition, sample_id, condition_id in zip(adata.obs_names, adata.obs.condition, adata.obs.sample_id, adata.obs.condition_id)]
+
+        adata.obsm['X_pca_seurat'] = pd.merge(adata.obs, pca, how='left', left_index=True, right_index=True)[pca.columns].values
+        adata.obsm['X_umap_seurat'] = pd.merge(adata.obs, umap, how='left', left_index=True, right_index=True)[umap.columns].values
+        adata.obs = pd.merge(adata.obs, metadata, how='left', left_index=True, right_index=True)
+        adata.write(output[0])
+
+rule split_prep:
+    input: WDIR + 'DexAb_combined_integrated_loomed_preprocessed_{maincelltype}.h5'
+    output: WDIR + 'DexAb_combined_integrated_loomed_preprocessed_{maincelltype}_{celltype}.h5'
+    run:
+        import scvelo as scv
+        from matplotlib.cm import get_cmap
+
+        # Load Macrophages
+        adata = sc.read(input[0])
+        celltypes = [wildcards.celltype]
+        adata = adata[np.isin(adata.obs.celltype, celltypes)].copy()
+        conditions = ['Untr', 'ab', 'dex', 'dexab']
+        adata = adata[np.isin(adata.obs.condition, conditions)].copy()
+        # recolor and seurat_umap rearrangement
+        if 'celltype_colors' in adata.uns.keys(): del adata.uns['celltype_colors']
+        adata.uns['condition_colors'] = [get_cmap('tab20')(i+15) for i in range(4)]
+        if 'Macrophage' in wildcards.celltype:
+            adata=adata[adata.obsm['X_umap_seurat'][:,1]>4].copy()  # make seurat umap nicer
+        # recomp var annots
+        if 'highly_variable' in adata.var.columns: adata.var = adata.var.drop('highly_variable', axis=1)
+        sc.pp.highly_variable_genes(adata, n_top_genes=2000)
+
+        perc = 0.01
+        # low numbers of unspliced also violate assumptions for CPM normalization --> throw out low unspliced count/feature cells
+        adata = calc_qc_scvelo(adata)
+        adata = adata[adata.obs.ufeatures>np.quantile(adata.obs.ufeatures, perc)].copy()
+        adata = adata[adata.obs.ufeatures>np.quantile(adata.obs.ucounts, perc)].copy()
+        scv.pp.filter_genes(adata, min_shared_counts=20)
+
+        # normalize other layers
+        scv.pp.normalize_per_cell(adata, layers=['unspliced', 'spliced'])
+
+        # With integrated pca (from seurat)
+        sc.pp.neighbors(adata, key_added='integrated', use_rep='X_pca_seurat')
+        sc.tl.umap(adata, neighbors_key='integrated')
+        sc.tl.diffmap(adata, neighbors_key='integrated')
+        sc.tl.louvain(adata, neighbors_key='integrated', key_added='louvain_integrated')
+        adata.obsm['X_diffmap_integrated'] = adata.obsm['X_diffmap']
+        adata.obsm['X_umap_integrated'] = adata.obsm['X_umap']
+
+        # With custom pca (scanpy)
+        sc.pp.pca(adata)
+        sc.pp.neighbors(adata)
+        sc.tl.umap(adata)
+        sc.tl.diffmap(adata)
+        sc.tl.louvain(adata)
+
+        # RNA velocity in 2 ways (seurat/scanpy pca)
+        sc.pp.neighbors(adata, use_rep='X_pca_seurat')
+        scv.pp.moments(adata)
+        adata.layers['Ms_seurat'] = adata.layers['Ms']
+        adata.layers['Mu_seurat'] = adata.layers['Mu']
+        scv.tl.velocity(adata, vkey='velocity_seurat')
+        scv.tl.velocity_graph(adata, vkey='velocity_seurat', xkey='Ms_seurat')
+        sc.pp.neighbors(adata)
+        scv.pp.moments(adata)
+        scv.tl.velocity(adata)
+        scv.tl.velocity_graph(adata)
+
+        # project / embedd
+        # autoscale must be false if not interactive backend
+        for basis in ['umap', 'umap_seurat', 'umap_integrated', 'diffmap', 'diffmap_integrated']:
+            scv.tl.velocity_embedding(adata, basis=basis, autoscale=False),
+            scv.tl.velocity_embedding(adata, basis=basis, autoscale=False, vkey='velocity_seurat')
+        adata.write(output[0])
+
+################ You do not need to run these, just take our loom file and replace DexAb_combined_loomed.h5 with it ################
+# We just supply this code so you can see how we generated the loom file.
+#
+# rule merge:
+#     input:
+#         files=expand([DIR+"DexAb_Sample{i}/outs/per_sample_outs/"+sample+"/velocyto/DexAb_Sample{i}_"+sample+"_loom_velocyto.h5" for sample in SAMPLES], i=['1', '2', '3'])
+#     output:
+#         WDIR + 'DexAb_combined_loomed.h5'
+#     run:
+#         adatas = {}
+#         for i in ['1', '2', '3']:
+#             for sample in SAMPLES:
+#                 name = "DexAb_Sample"+i+"_"+sample
+#                 adata = sc.read(DIR+"DexAb_Sample"+i+"/outs/per_sample_outs/"+sample+"/velocyto/"+name+"_loom_velocyto.h5")
+#                 adata.var_names_make_unique()
+#                 adatas[name]=adata
+#         adata = sc.concat(adatas, axis=0, index_unique='-', label='origin')
+#         adata.write(output[0])
+#
+# rule cellranger_multi:
+#     input: DIR + "multiconfig{i}.csv"
+#     output: [DIR+"DexAb_Sample{i}/outs/per_sample_outs/"+sample+"/count/sample_alignments.bam" for sample in SAMPLES]
+#     shell:
+#         '''
+#         cd {DIR}
+#         rm -r {DIR}/DexAb_Sample{wildcards.i}  # Martian needs to make folder itself
+#         cellranger multi --id DexAb_Sample{wildcards.i} --csv {input} --localcores 8 --localmem 15
+#         '''
+#
+# rule velocyto:
+#     input:
+#         pbam=DIR+"DexAb_Sample{i}/outs/per_sample_outs/{sample}/count/sample_alignments.bam",
+#         gtf=GTF
+#     output: DIR+"DexAb_Sample{i}/outs/per_sample_outs/{sample}/velocyto/DexAb_Sample{i}_{sample}_loom.loom"
+#     log: "log/DexAb_Sample{i}_{sample}_velocyto.log"
+#     shell:
+#         '''
+#         export LC_ALL=en_US.utf8
+#         # mkdir -p {DIR}/DexAb_Sample{wildcards.i}/outs/per_sample_outs/{wildcards.sample}/velocyto/
+#         velocyto run \
+#         -o {DIR}/DexAb_Sample{wildcards.i}/outs/per_sample_outs/{wildcards.sample}/velocyto/ \
+#         -e DexAb_Sample{wildcards.i}_{wildcards.sample}_loom \
+#         {input.pbam} \
+#         {input.gtf} > {log}
+#         '''
+#
+# rule loom_to_velocyto_h5:
+#     input: "{i}.loom"
+#     output: "{i}_velocyto.h5"
+#     run:
+#         import scvelo as scv
+#         adata = scv.read_loom(input[0])
+#         adata.obs_names = [x.split(':')[-1]+'-1' for x in adata.obs_names]
+#         adata.write(output[0])
