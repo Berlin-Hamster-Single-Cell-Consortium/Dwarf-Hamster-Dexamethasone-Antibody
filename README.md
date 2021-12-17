@@ -1,4 +1,4 @@
-# Dwarf-Hamster-Dexamethasone-Antibody
+# Roborovski dwarf hamster scRNA-seq (Dexamethasone/antibody treatments, lung samples)
 Single-cell RNA-sequencing 
 
 Raw and processed files are available at NCBI GEO, https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE191080
