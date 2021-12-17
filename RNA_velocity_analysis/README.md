@@ -1,7 +1,7 @@
 # Info
 
 This is the python code for the RNA velocity analysis and diffusion analysis of the
-dwarf hamster scRNA-seq data (PhoRob_DexAb).
+dwarf hamster scRNA-seq data (PhoRob_DexAb). The loom file is available at https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE191080.
 
 # Install & Snakemake
 
