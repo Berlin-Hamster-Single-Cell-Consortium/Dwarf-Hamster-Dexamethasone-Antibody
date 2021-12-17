@@ -1,0 +1,24 @@
+[gene-expression]
+reference,/path/to/references/refdata-cellranger-pr1_fixed_names_filtered_complete_fixed_unknown_ext_rev2_S2/
+
+[libraries]
+fastq_id,fastqs,feature_types
+GEX_Hamster1,/path/to/first/sequencing/,Gene Expression
+GEX_Hamster1,/path/to/second/sequencing/,Gene Expression
+CellPlex_Hamster1,/path/to/first/sequencing/,Multiplexing Capture
+CellPlex_Hamster1,/path/to/second/sequencing/,Multiplexing Capture
+
+[samples]
+sample_id,cmo_ids
+U1,CMO301
+U2,CMO302
+U3,CMO303
+AB1,CMO304
+AB2,CMO305
+AB3,CMO306
+D1,CMO307
+D2,CMO308
+D3,CMO309
+ABD1,CMO310
+ABD2,CMO311
+ABD3,CMO312
